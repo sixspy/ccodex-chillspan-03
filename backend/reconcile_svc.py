@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user
+from cursor_seal_gate import gate_for_batch
 from db import connect
 
 router = APIRouter(tags=["reconcile"])
@@ -72,7 +73,7 @@ def reconcile_one(chamber_code: str, authorization: AuthHeader = None):
 
 @router.get("/api/proof/batch/{batch_code}")
 def batch_proof(batch_code: str, authorization: AuthHeader = None):
-    """批次互证：封批代 + 温谱导出 + 开放游标。"""
+    """批次互证：封批代 + 温谱导出 + 开放游标 + 游标封批闸（五页同源）。"""
     require_user(authorization)
     with connect() as conn:
         batch = conn.execute(
@@ -80,17 +81,14 @@ def batch_proof(batch_code: str, authorization: AuthHeader = None):
         ).fetchone()
         if not batch:
             raise HTTPException(404, "批次不存在")
-        open_exc = conn.execute(
-            """SELECT COUNT(*) c FROM excursion_cursors
-               WHERE batch_id=? AND status='开放'""",
-            (batch["id"],),
-        ).fetchone()["c"]
+        gate = gate_for_batch(conn, batch["id"])
+        open_exc = gate["open_cursors"]
         exports = conn.execute(
             """SELECT COUNT(*) c FROM spectrum_exports
                WHERE batch_id=? AND status='已导出'""",
             (batch["id"],),
         ).fetchone()["c"]
-        sealed = batch["status"] == "已封批"
+        sealed = gate["formal_sealed"]
         spectrum_ok = (exports >= 1) if sealed else True
         return {
             "batch_code": batch_code,
@@ -101,6 +99,7 @@ def batch_proof(batch_code: str, authorization: AuthHeader = None):
             "sealed": sealed,
             "excursion_closed": open_exc == 0,
             "spectrum_matches_seal": spectrum_ok,
+            "gate": gate,
             "proof": {
                 "formula": "sealed => spectrum>=1 and open_excursions==0",
                 "sealed": sealed,

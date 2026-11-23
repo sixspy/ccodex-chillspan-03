@@ -7,6 +7,7 @@ import json
 from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
+from cursor_seal_gate import attach_gate, gate_for_batch
 from db import connect, now_iso, write_audit
 from models import SpectrumIn
 
@@ -21,7 +22,7 @@ def list_exports(authorization: AuthHeader = None):
             """SELECT s.*, b.batch_code FROM spectrum_exports s
                JOIN temp_batches b ON b.id=s.batch_id ORDER BY s.id DESC"""
         ).fetchall()
-        return {"items": [dict(r) for r in rows]}
+        return {"items": attach_gate(conn, rows)}
 
 
 @router.post("/api/spectrum/export")
@@ -33,6 +34,11 @@ def export_spectrum(body: SpectrumIn, authorization: AuthHeader = None):
         ).fetchone()
         if not batch:
             raise HTTPException(404, "批次不存在")
+        gate = gate_for_batch(conn, body.batch_id)
+        if gate and gate["open_cursors"]:
+            raise HTTPException(409, "存在开放超温游标，禁止导出温谱")
+        if not gate or not gate["consistent"]:
+            raise HTTPException(409, "游标封批账实不一致，禁止导出温谱")
         if batch["status"] != "已封批":
             raise HTTPException(409, "须先封批再导出温谱")
         points = json.loads(batch["temp_points"] or "[]")

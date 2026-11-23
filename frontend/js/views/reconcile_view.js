@@ -15,6 +15,7 @@ export const reconcileViewTemplate = `
   </div>
   <div v-if="proofOne" class="detail-box">
     <p>状态 {{ proofOne.status }} · 开放游标 {{ proofOne.open_excursions }} · 温谱 {{ proofOne.spectrum_exports }}</p>
+    <p v-if="proofOne.gate">封批闸：草稿意图 {{ proofOne.gate.pending_intent ? "有" : "无" }} · 正式封批 {{ proofOne.gate.formal_sealed ? "是" : "否" }} · 轨道 {{ proofOne.gate.track }} · 账实{{ proofOne.gate.consistent ? "一致" : "不一致" }}</p>
   </div>
   <table class="data-table">
     <thead><tr><th>仓间</th><th>区域</th><th>在批</th><th>余配额</th><th>平衡</th></tr></thead>

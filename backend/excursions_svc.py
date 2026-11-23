@@ -6,8 +6,9 @@ import json
 from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
+from cursor_seal_gate import attach_gate, write_ledger
 from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from locks import cursor_seal_guard
 from models import ExcursionCloseIn, ExcursionOpenIn
 from validators import detect_excursion
 
@@ -26,16 +27,14 @@ def list_excursions(authorization: AuthHeader = None, status: str | None = None)
             ).fetchall()
         else:
             rows = conn.execute(q + " ORDER BY e.id DESC").fetchall()
-        return {"items": [dict(r) for r in rows]}
+        return {"items": attach_gate(conn, rows)}
 
 
 @router.post("/api/excursions/open")
 def open_excursion(body: ExcursionOpenIn, authorization: AuthHeader = None):
     user = require_writer(authorization)
-    lock_key = f"batch:{body.batch_id}"
     with connect() as conn:
-        require_lock(conn, lock_key, user)
-        try:
+        with cursor_seal_guard(conn, body.batch_id, user):
             batch = conn.execute(
                 "SELECT * FROM temp_batches WHERE id=?", (body.batch_id,)
             ).fetchone()
@@ -79,8 +78,6 @@ def open_excursion(body: ExcursionOpenIn, authorization: AuthHeader = None):
             )
             conn.commit()
             return {"id": cur.lastrowid, "cursor_key": key, "peak_temp": peak, "status": "开放"}
-        finally:
-            release(conn, lock_key, user)
 
 
 @router.post("/api/excursions/close")
@@ -92,24 +89,38 @@ def close_excursion(body: ExcursionCloseIn, authorization: AuthHeader = None):
         ).fetchone()
         if not row:
             raise HTTPException(404, "游标不存在")
-        if row["status"] != "开放":
-            raise HTTPException(409, "游标已关闭")
-        now = now_iso()
-        conn.execute(
-            """UPDATE excursion_cursors SET status='已闭', closed_at=?, note=?
-               WHERE id=?""",
-            (now, body.note or row["note"], body.cursor_id),
-        )
-        open_left = conn.execute(
-            """SELECT COUNT(*) c FROM excursion_cursors
-               WHERE batch_id=? AND status='开放'""",
-            (row["batch_id"],),
-        ).fetchone()["c"]
-        if open_left == 0:
+        with cursor_seal_guard(conn, row["batch_id"], user):
+            row = conn.execute(
+                "SELECT * FROM excursion_cursors WHERE id=?", (body.cursor_id,)
+            ).fetchone()
+            if row["status"] != "开放":
+                raise HTTPException(409, "游标已关闭")
+            now = now_iso()
             conn.execute(
-                "UPDATE temp_batches SET status='已入库' WHERE id=? AND status='超温处理中'",
-                (row["batch_id"],),
+                """UPDATE excursion_cursors SET status='已闭', closed_at=?, note=?
+                   WHERE id=?""",
+                (now, body.note or row["note"], body.cursor_id),
             )
-        write_audit(conn, user, "excursion_close", row["cursor_key"], {})
-        conn.commit()
-        return {"id": body.cursor_id, "status": "已闭", "closed_at": now}
+            open_left = conn.execute(
+                """SELECT COUNT(*) c FROM excursion_cursors
+                   WHERE batch_id=? AND status='开放'""",
+                (row["batch_id"],),
+            ).fetchone()["c"]
+            if open_left == 0:
+                conn.execute(
+                    "UPDATE temp_batches SET status='已入库' WHERE id=? AND status='超温处理中'",
+                    (row["batch_id"],),
+                )
+            write_ledger(
+                conn,
+                now=now,
+                batch_id=row["batch_id"],
+                actor=user,
+                track="游标",
+                decision="收口",
+                detail=f"游标 {row['cursor_key']} 已闭",
+                cursor_id=body.cursor_id,
+            )
+            write_audit(conn, user, "excursion_close", row["cursor_key"], {})
+            conn.commit()
+            return {"id": body.cursor_id, "status": "已闭", "closed_at": now}

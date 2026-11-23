@@ -154,6 +154,33 @@ CREATE TABLE IF NOT EXISTS route_plans(
   status TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS seal_intents(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  manifest TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  settled_at TEXT,
+  seal_id INTEGER,
+  FOREIGN KEY(batch_id) REFERENCES temp_batches(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_seal_intents_draft
+  ON seal_intents(batch_id) WHERE status='草稿';
+CREATE TABLE IF NOT EXISTS cursor_seal_ledger(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id INTEGER NOT NULL,
+  cursor_id INTEGER,
+  intent_id INTEGER,
+  track TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  deviation TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  closed_at TEXT NOT NULL,
+  FOREIGN KEY(batch_id) REFERENCES temp_batches(id)
+);
 CREATE TABLE IF NOT EXISTS chamber_locks(
   lock_key TEXT PRIMARY KEY,
   holder TEXT NOT NULL,
@@ -398,6 +425,40 @@ def seed_lineage_samples(conn: sqlite3.Connection) -> None:
     )
 
 
+def seed_seal_snapshots(conn: sqlite3.Connection) -> None:
+    """已封批批次必须有同代快照，五页账实才同源（旧种子缺快照）。"""
+    rows = conn.execute(
+        """SELECT b.id, b.batch_code, b.generation, b.min_observed, b.max_observed,
+                  b.temp_points, b.sealed_at
+           FROM temp_batches b
+           WHERE b.status='已封批'
+             AND NOT EXISTS (SELECT 1 FROM seal_snapshots s WHERE s.batch_id=b.id)"""
+    ).fetchall()
+    for row in rows:
+        manifest = json.dumps(
+            {
+                "batch_code": row["batch_code"],
+                "generation": row["generation"],
+                "point_count": len(json.loads(row["temp_points"] or "[]")),
+                "min": row["min_observed"],
+                "max": row["max_observed"],
+                "open_cursors": 0,
+            },
+            ensure_ascii=False,
+        )
+        conn.execute(
+            """INSERT INTO seal_snapshots(batch_id,batch_generation,manifest,status,sealed_at)
+               VALUES (?,?,?,?,?)""",
+            (
+                row["id"],
+                row["generation"],
+                manifest,
+                "已封批",
+                row["sealed_at"] or now_iso(),
+            ),
+        )
+
+
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
@@ -409,6 +470,7 @@ def init_db() -> None:
         seed_calibrations(conn)
         seed_routes(conn)
         seed_lineage_samples(conn)
+        seed_seal_snapshots(conn)
         conn.commit()
 
 

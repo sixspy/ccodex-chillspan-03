@@ -83,6 +83,9 @@ createApp({
     });
     const excOpenForm = ref({ batch_id: 0, threshold: null, note: "" });
     const sealForm = ref({ batch_id: 0, manifest: "" });
+    const sealIntentForm = ref({ batch_id: 0, manifest: "" });
+    const bill = ref({ selected: null, intents: [], ledger: [], gate: null });
+    const billAll = { intents: [], ledger: [] };
     const spectrumForm = ref({ batch_id: 0 });
     const lineageForm = ref({
       from_batch_id: 1,
@@ -125,10 +128,23 @@ createApp({
       batches.value.filter((b) => b.status !== "已封批" && b.status !== "草稿")
     );
     const sealableBatches = computed(() =>
-      batches.value.filter((b) => b.status === "已入库" || b.status === "超温处理中")
+      batches.value.filter(
+        (b) =>
+          (b.status === "已入库" || b.status === "超温处理中") &&
+          !(b.gate && (b.gate.open_cursors || b.gate.pending_intent))
+      )
     );
     const sealedBatches = computed(() =>
       batches.value.filter((b) => b.status === "已封批")
+    );
+    const gatedBatches = computed(() =>
+      batches.value.filter((b) => b.gate && b.gate.blocked)
+    );
+    const intentBatches = computed(() =>
+      batches.value.filter(
+        (b) =>
+          (b.status === "已入库" || b.status === "超温处理中") && b.gate
+      )
     );
 
     function fmtTemp(n) {
@@ -192,7 +208,7 @@ createApp({
       if (!token.value) return;
       clearFlash();
       try {
-        const [ch, pr, bt, ex, sl, sp, lg, cal, rt, d, cj, tj] = await Promise.all([
+        const [ch, pr, bt, ex, sl, sp, lg, cal, rt, d, cj, tj, it, ld] = await Promise.all([
           api.chambers(),
           api.probes(),
           api.batches(),
@@ -205,6 +221,8 @@ createApp({
           api.dashboard(),
           api.carrierJobs(),
           api.thawJobs(),
+          api.sealIntents(),
+          api.cursorSealLedger(),
         ]);
         chambers.value = ch.items || [];
         probes.value = pr.items || [];
@@ -218,6 +236,12 @@ createApp({
         dash.value = d || {};
         carrierJobs.value = cj.items || [];
         thawJobs.value = tj.items || [];
+        billAll.intents = it.items || [];
+        billAll.ledger = ld.items || [];
+        if (!bill.value.selected && gatedBatches.value.length) {
+          bill.value.selected = gatedBatches.value[0].id;
+        }
+        syncGateDetail();
 
         if (chambers.value.length && !probeForm.value.chamber_id) {
           probeForm.value.chamber_id = chambers.value[0].id;
@@ -233,6 +257,12 @@ createApp({
         }
         if (sealableBatches.value.length) {
           sealForm.value.batch_id = sealableBatches.value[0].id;
+        }
+        if (intentBatches.value.length) {
+          const has = intentBatches.value.some(
+            (b) => b.id === sealIntentForm.value.batch_id
+          );
+          if (!has) sealIntentForm.value.batch_id = intentBatches.value[0].id;
         }
         if (sealedBatches.value.length) {
           spectrumForm.value.batch_id = sealedBatches.value[0].id;
@@ -253,6 +283,18 @@ createApp({
         }
       }
     );
+
+    watch(
+      () => sealIntentForm.value.batch_id,
+      (bid) => {
+        if (bid) loadGateBatch(bid, true);
+      }
+    );
+
+    async function selectExcursion(e) {
+      selectedExcursion.value = e;
+      await loadGateBatch(e.batch_id);
+    }
 
     async function createChamber() {
       clearFlash();
@@ -332,9 +374,10 @@ createApp({
           cursor_id: selectedExcursion.value.id,
           note: "前端闭环",
         });
-        flashOk("游标已闭");
         await refresh();
+        flashOk("游标已闭");
       } catch (e) {
+        await refresh();
         flashErr(e);
       }
     }
@@ -343,9 +386,74 @@ createApp({
       clearFlash();
       try {
         const row = await api.seal(sealForm.value);
-        flashOk(`封批完成 代${row.generation}`);
         await refresh();
+        flashOk(`封批完成 代${row.generation}`);
       } catch (e) {
+        // 拒写/争用后立刻重取闸账，五页不能靠旧快照各说各话
+        await refresh();
+        flashErr(e);
+      }
+    }
+
+    /* 游标封批闸：五页共读同一份 gate，台账与意图只做展示与乙轨动作 */
+    const gateOf = (batchId) => {
+      const b = batches.value.find((x) => x.id === batchId);
+      return (b && b.gate) || null;
+    };
+    function syncGateDetail() {
+      const bid = bill.value.selected;
+      bill.value.gate = bid ? gateOf(bid) : null;
+      bill.value.intents = bid
+        ? billAll.intents.filter((x) => x.batch_id === bid)
+        : [];
+      bill.value.ledger = bid
+        ? billAll.ledger.filter((x) => x.batch_id === bid)
+        : [];
+    }
+    async function loadGateBatch(batchId, quiet = false) {
+      if (!quiet) clearFlash();
+      try {
+        bill.value.selected = batchId;
+        const [g, it, ld] = await Promise.all([
+          api.gate(batchId),
+          api.sealIntents(batchId),
+          api.cursorSealLedger(batchId),
+        ]);
+        bill.value.gate = g;
+        bill.value.intents = it.items || [];
+        bill.value.ledger = ld.items || [];
+        if (!quiet) flashOk(`批次 ${g.batch_code} 游标封批闸已加载`);
+      } catch (e) {
+        flashErr(e);
+      }
+    }
+    async function draftSealIntent() {
+      clearFlash();
+      try {
+        const bid = sealIntentForm.value.batch_id || bill.value.selected;
+        if (!bid) throw new Error("请选择批次");
+        const row = await api.createSealIntent({
+          batch_id: bid,
+          manifest: sealIntentForm.value.manifest,
+        });
+        await refresh();
+        await loadGateBatch(bid, true);
+        flashOk(`草稿封批意图 #${row.id} 已落（正式表零改）`);
+      } catch (e) {
+        await refresh();
+        flashErr(e);
+      }
+    }
+    async function promoteSealIntent(intentId) {
+      clearFlash();
+      try {
+        const row = await api.promoteSealIntent(intentId);
+        await refresh();
+        if (bill.value.selected) await loadGateBatch(bill.value.selected, true);
+        flashOk(`意图晋升正式封批 代${row.generation}`);
+      } catch (e) {
+        await refresh();
+        if (bill.value.selected) await loadGateBatch(bill.value.selected, true);
         flashErr(e);
       }
     }
@@ -484,6 +592,14 @@ createApp({
       batchForm,
       excOpenForm,
       sealForm,
+      sealIntentForm,
+      bill,
+      gatedBatches,
+      intentBatches,
+      loadGateBatch,
+      selectExcursion,
+      draftSealIntent,
+      promoteSealIntent,
       spectrumForm,
       lineageForm,
       calForm,

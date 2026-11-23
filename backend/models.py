@@ -44,6 +44,11 @@ class SealIn(BaseModel):
     manifest: str = ""
 
 
+class SealIntentIn(BaseModel):
+    batch_id: int
+    manifest: str = ""
+
+
 class SpectrumIn(BaseModel):
     batch_id: int
 

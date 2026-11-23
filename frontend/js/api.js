@@ -50,6 +50,19 @@ export function createApi(getToken, onUnauthorized) {
       req("/api/excursions/close", { method: "POST", body: JSON.stringify(data) }),
     seals: () => req("/api/seals"),
     seal: (data) => req("/api/seals", { method: "POST", body: JSON.stringify(data) }),
+    sealIntents: (batchId) =>
+      req(batchId ? `/api/seal-intents?batch_id=${batchId}` : "/api/seal-intents"),
+    createSealIntent: (data) =>
+      req("/api/seal-intents", { method: "POST", body: JSON.stringify(data) }),
+    promoteSealIntent: (id) =>
+      req(`/api/seal-intents/${id}/promote`, { method: "POST", body: "{}" }),
+    cursorSealLedger: (batchId) =>
+      req(
+        batchId
+          ? `/api/cursor-seal-ledger?batch_id=${batchId}`
+          : "/api/cursor-seal-ledger"
+      ),
+    gate: (batchId) => req(`/api/cursor-seal-gate/${batchId}`),
     spectrumList: () => req("/api/spectrum"),
     spectrumExport: (data) =>
       req("/api/spectrum/export", { method: "POST", body: JSON.stringify(data) }),

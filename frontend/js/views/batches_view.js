@@ -19,7 +19,7 @@ export const batchesViewTemplate = `
     <button class="secondary" @click="refresh">刷新</button>
   </div>
   <table class="data-table">
-    <thead><tr><th>批次</th><th>仓间</th><th>探头</th><th>状态</th><th>代</th><th>极值</th><th></th></tr></thead>
+    <thead><tr><th>批次</th><th>仓间</th><th>探头</th><th>状态</th><th>代</th><th>极值</th><th>封批闸</th><th></th></tr></thead>
     <tbody>
       <tr v-for="b in batches" :key="b.id" @click="selectBatch(b)">
         <td>{{ b.batch_code }}</td>
@@ -28,6 +28,12 @@ export const batchesViewTemplate = `
         <td><span class="badge" :class="statusClass(b.status)">{{ b.status }}</span></td>
         <td>{{ b.generation }}</td>
         <td>{{ fmtTemp(b.min_observed) }} / {{ fmtTemp(b.max_observed) }}</td>
+        <td>
+          <span v-if="b.gate" class="badge" :class="b.gate.open_cursors ? 'fail' : (b.gate.consistent ? 'pass' : 'fail')">
+            {{ b.gate.open_cursors ? "闸闭合" : (b.gate.consistent ? "闸开" : "不一致") }}
+          </span>
+          <span v-else class="badge frozen">—</span>
+        </td>
         <td><button class="mini-btn" @click.stop="loadBatchDetail(b.id)">详情</button></td>
       </tr>
     </tbody>
@@ -35,6 +41,8 @@ export const batchesViewTemplate = `
   <div v-if="batchDetail" class="detail-box">
     <h3>{{ batchDetail.batch.batch_code }} · {{ batchDetail.batch.cargo_ref }}</h3>
     <p>点数 {{ batchDetail.batch.temp_points.length }} · 游标 {{ batchDetail.excursions.length }} 条</p>
+    <p v-if="batchDetail.gate">封批闸：开放游标 {{ batchDetail.gate.open_cursors }} · 草稿意图 {{ batchDetail.gate.pending_intent ? "有" : "无" }} · 正式封批 {{ batchDetail.gate.formal_sealed ? "是" : "否" }} · 账实{{ batchDetail.gate.consistent ? "一致" : "不一致" }}</p>
+    <button class="mini-btn" @click="loadGateBatch(batchDetail.batch.id)">查看游标封批台账</button>
   </div>
 </section>
 `;

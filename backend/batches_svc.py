@@ -6,6 +6,7 @@ import json
 from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
+from cursor_seal_gate import attach_gate, gate_for_batch
 from db import connect, now_iso, write_audit
 from locks import release, require_lock
 from models import BatchIn
@@ -50,7 +51,7 @@ def list_batches(authorization: AuthHeader = None, status: str | None = None):
             d = dict(r)
             d["temp_points"] = json.loads(d["temp_points"] or "[]")
             items.append(d)
-        return {"items": items}
+        return {"items": attach_gate(conn, items, id_key="id")}
 
 
 @router.get("/api/batches/{batch_id}")
@@ -80,6 +81,7 @@ def get_batch(batch_id: int, authorization: AuthHeader = None):
             "batch": data,
             "excursions": [dict(e) for e in exc],
             "seals": [dict(s) for s in seals],
+            "gate": gate_for_batch(conn, batch_id),
         }
 
 
